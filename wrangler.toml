@@ -1,0 +1,14 @@
+name = "zipkit-mcp"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+PUBLIC_BASE_URL = "https://zipkit.cc"
+
+# Premium tier gate: requests with x-zipkit-key header matching this secret unlock premium tools.
+# Set via: npx wrangler secret put ZIPKIT_PREMIUM_KEY
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0
