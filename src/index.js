@@ -197,7 +197,8 @@ const TOOLS = [
       if (!args.is_tax_resident_180_days) {
         return { content: [{ type: 'text', text: JSON.stringify({ verdict: 'NO_THAI_TAX_OBLIGATION', note: 'Non-resident: remittances not assessed. Watch day count across the full calendar year.' }, null, 2) }] };
       }
-      let assessableBase = args.annual_assessable_income_thb ?? 0;
+      const otherIncome = args.annual_assessable_income_thb ?? 0;
+      let assessableBase = otherIncome;
       const items = [];
       for (const r of args.planned_remittances_thb) {
         const item = { amount_thb: r.amount_thb, earned_year: r.earned_year };
@@ -217,8 +218,8 @@ const TOOLS = [
         if (assessable.length < 2) return null;
         const totalAssessable = assessable.reduce((s, x) => s + x.amount_thb, 0);
         const half = totalAssessable / 2;
-        const oneYear = computeThaiTax(assessableBase + totalAssessable, undefined).estimated_tax_thb;
-        const twoYears = computeThaiTax(assessableBase + half, undefined).estimated_tax_thb
+        const oneYear = r.estimated_tax_thb;
+        const twoYears = computeThaiTax(otherIncome + half, undefined).estimated_tax_thb
           + computeThaiTax(half, undefined).estimated_tax_thb;
         return {
           strategy: 'Split remittances across two tax years',
