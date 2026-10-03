@@ -3,11 +3,11 @@
  *
  * Free tools:
  *   - thai_tax_calculator      Progressive tax brackets 0–35%
- *   - remittance_tax_checker   Por.161/162 decision engine (basic)
+ *   - remittance_tax_checker   Remittance review checklist (no tax verdict)
  *   - residency_day_counter    180-day threshold calculator
  *
  * Premium tools (require ZIPKIT_PREMIUM_KEY header):
- *   - remittance_rule_engine   Full assessment with planning scenarios
+ *   - remittance_rule_engine   Remittance review checklist (estimates withheld)
  *   - thai_expert_query        Curated Thai-expat knowledge base lookup
  *
  * Data source: zipkit.cc research (Revenue Dept orders, official schedules).
@@ -47,6 +47,38 @@ function computeThaiTax(income, deductions) {
   };
 }
 
+// These schemas do not collect enough facts to determine remittance tax or relief.
+// Preserve the submitted evidence without treating a current-year residency answer
+// or a foreign-tax rate/proof flag as an income-year or treaty determination.
+const REMITTANCE_REVIEW_CHECKLIST = [
+  'Verify when each income amount arose and residency in that income year; the current-year 180-day answer is insufficient for earlier income.',
+  'Verify the source country, income category, applicable treaty, treaty residence and taxing rights.',
+  'Verify the actual foreign income tax paid, its connection to the income, payment evidence and applicable credit limit.',
+  'Verify the nature of the funds and the remittance amount, date and method; remittance is not limited to a Thai bank transfer.',
+  'Review relevant deductions, other income and current rules before computing liability or comparing years.',
+];
+
+function remittanceReviewResult(inputEvidence, assessments = []) {
+  return { content: [{ type: 'text', text: JSON.stringify({
+    verdict: 'NEEDS_REVIEW',
+    assessment_available: false,
+    reasoning: 'These inputs do not establish remittance tax liability or foreign tax credit entitlement. A foreign tax rate and proof of payment alone do not establish an exemption. No tax or savings amount has been calculated.',
+    input_evidence: inputEvidence,
+    assessments,
+    combined_estimate: null,
+    planning: null,
+    review_checklist: REMITTANCE_REVIEW_CHECKLIST,
+    sources: [
+      'https://www.rd.go.th/fileadmin/user_upload/porphor/GuideTaxFromAbroad_EN.pdf',
+      'https://www.rd.go.th/fileadmin/download/news/question_p161_162.pdf',
+      'https://www.rd.go.th/fileadmin/user_upload/kormor/newlaw/dn161A.pdf',
+      'https://www.rd.go.th/fileadmin/user_upload/kormor/newlaw/dn162A.pdf',
+    ],
+    safeguard_reviewed: '2026-10-03',
+    disclaimer: 'Educational review checklist, not tax advice. Unavailable estimates are not zero and must not be used as a no-tax or exemption result.',
+  }, null, 2) }] };
+}
+
 // JSON-RPC over HTTP POST (stateless MCP transport — works on any agent client)
 function jsonRpcResult(id, result) {
   return new Response(JSON.stringify({ jsonrpc: '2.0', id, result }), {
@@ -74,7 +106,13 @@ const TOOLS = [
     },
     free: true,
     handler: async (args) => {
-      if (!(args.annual_income_thb >= 0)) throw new Error('annual_income_thb must be a non-negative number');
+      if (!Number.isFinite(args.annual_income_thb) || args.annual_income_thb < 0) {
+        throw new Error('annual_income_thb must be a finite non-negative number');
+      }
+      if (args.custom_deductions_thb !== undefined &&
+          (!Number.isFinite(args.custom_deductions_thb) || args.custom_deductions_thb < 0)) {
+        throw new Error('custom_deductions_thb must be a finite non-negative number when supplied');
+      }
       const r = computeThaiTax(args.annual_income_thb, args.custom_deductions_thb);
       return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
     },
@@ -82,38 +120,24 @@ const TOOLS = [
 
   {
     name: 'remittance_tax_checker',
-    description: 'Check whether money remitted into Thailand is likely taxable under the 2024+ rules (Por.161/162/2566). Answers the four-factor test: residency, earning year, remittance, foreign-tax credit.',
+    description: 'Prepare a remittance review checklist. Always returns NEEDS_REVIEW with unavailable tax and planning estimates: the legacy inputs cannot determine income-year residency, treaty relief or tax liability.',
     inputSchema: {
       type: 'object',
       properties: {
-        is_tax_resident_180_days: { type: 'boolean', description: 'Will spend 180+ days in Thailand this calendar year?' },
+        is_tax_resident_180_days: { type: 'boolean', description: 'Legacy current-calendar-year 180-day answer. Does not establish residency in the year each income amount was earned.' },
         income_earned_2024_or_later: { type: 'boolean', description: 'Was the income earned in 2024 or later?' },
-        will_remit_to_thailand: { type: 'boolean', description: 'Will funds be transferred into a Thai bank account?' },
-        foreign_tax_paid_above_15pct_with_proof: { type: 'boolean', description: 'Was ≥15% tax already paid abroad with documentary proof?' },
+        will_remit_to_thailand: { type: 'boolean', description: 'Legacy remittance answer. Review the actual method and date; a Thai bank transfer is not the only form of remittance.' },
+        foreign_tax_paid_above_15pct_with_proof: { type: 'boolean', description: 'Deprecated legacy evidence flag retained for input compatibility. Neither true nor false determines exemption or foreign tax credit entitlement.' },
       },
       required: ['is_tax_resident_180_days', 'income_earned_2024_or_later', 'will_remit_to_thailand', 'foreign_tax_paid_above_15pct_with_proof'],
     },
     free: true,
-    handler: async (a) => {
-      let verdict, reasoning;
-      if (!a.is_tax_resident_180_days) {
-        verdict = 'NOT_TAXABLE'; reasoning = 'Under 180 days = generally not a Thai tax resident; remittances outside PIT scope.';
-      } else if (!a.income_earned_2024_or_later) {
-        verdict = 'NOT_TAXABLE_PRE_2024_INCOME'; reasoning = 'Por.162/2566 grandfathers income earned before 1 Jan 2024 even when remitted now.';
-      } else if (!a.will_remit_to_thailand) {
-        verdict = 'NOT_CURRENTLY_TAXABLE'; reasoning = 'Trigger is remittance into Thailand. Keeping/spending abroad avoids assessment; future remittance likely taxable.';
-      } else if (a.foreign_tax_paid_above_15pct_with_proof) {
-        verdict = 'POSSIBLY_EXEMPT_CREDITABLE_REMITTANCE'; reasoning = 'Income taxed abroad at >=15% with evidence may qualify for exemption from further Thai tax.';
-      } else {
-        verdict = 'LIKELY_TAXABLE'; reasoning = 'Tax resident + post-2024 income + remitted + no >=15% foreign-tax proof = assessable under Por.161/2566.';
-      }
-      return { content: [{ type: 'text', text: JSON.stringify({
-        verdict,
-        reasoning,
-        basis: ['Por.161/2566', 'Por.162/2566', 'Revenue Code Section 41'],
-        disclaimer: 'Educational estimate as of Aug 2026; not tax advice. Verify current RD guidance.',
-      }, null, 2) }] };
-    },
+    handler: async (a) => remittanceReviewResult({
+      is_tax_resident_180_days: a.is_tax_resident_180_days ?? null,
+      income_earned_2024_or_later: a.income_earned_2024_or_later ?? null,
+      will_remit_to_thailand: a.will_remit_to_thailand ?? null,
+      foreign_tax_paid_above_15pct_with_proof: a.foreign_tax_paid_above_15pct_with_proof ?? null,
+    }),
   },
 
   {
@@ -169,11 +193,11 @@ const TOOLS = [
 
   {
     name: 'remittance_rule_engine',
-    description: 'PREMIUM. Full remittance assessment with multi-year planning scenarios: bracket-aware tax computation on remitted amounts, timing-split suggestions, creditable-remittance analysis and documented caveats.',
+    description: 'PREMIUM-GATED. Remittance review checklist only. Always returns NEEDS_REVIEW, with combined_estimate and planning set to null; tax, exemption, credit and savings calculations are unavailable pending case-specific review.',
     inputSchema: {
       type: 'object',
       properties: {
-        is_tax_resident_180_days: { type: 'boolean' },
+        is_tax_resident_180_days: { type: 'boolean', description: 'Legacy current-year residency answer; does not establish residency in each income year.' },
         annual_assessable_income_thb: { type: 'number', description: 'Other Thai assessable income this year (salary etc.) excluding the remitted amount' },
         planned_remittances_thb: {
           type: 'array',
@@ -183,8 +207,8 @@ const TOOLS = [
             properties: {
               amount_thb: { type: 'number' },
               earned_year: { type: 'number', description: 'Year the underlying income was earned' },
-              foreign_tax_paid_pct: { type: 'number', description: 'Foreign tax already paid, percent (0-100)' },
-              has_proof: { type: 'boolean' },
+              foreign_tax_paid_pct: { type: 'number', description: 'Reported foreign-tax percentage (0-100), retained as evidence only. No percentage triggers an exemption or credit.' },
+              has_proof: { type: 'boolean', description: 'Whether supporting records are available; this flag does not validate the tax or establish relief.' },
             },
             required: ['amount_thb', 'earned_year'],
           },
@@ -193,52 +217,27 @@ const TOOLS = [
       required: ['is_tax_resident_180_days', 'planned_remittances_thb'],
     },
     free: false,
-    handler: async (args, env) => {
-      if (!args.is_tax_resident_180_days) {
-        return { content: [{ type: 'text', text: JSON.stringify({ verdict: 'NO_THAI_TAX_OBLIGATION', note: 'Non-resident: remittances not assessed. Watch day count across the full calendar year.' }, null, 2) }] };
+    handler: async (args) => {
+      if (!Array.isArray(args.planned_remittances_thb)) {
+        throw new Error('planned_remittances_thb must be an array');
       }
-      const otherIncome = args.annual_assessable_income_thb ?? 0;
-      let assessableBase = otherIncome;
-      const items = [];
-      for (const r of args.planned_remittances_thb) {
-        const item = { amount_thb: r.amount_thb, earned_year: r.earned_year };
-        if (r.earned_year < 2024) {
-          item.status = 'EXEMPT_PRE_2024'; item.taxable = false;
-        } else if ((r.foreign_tax_paid_pct ?? 0) >= 15 && r.has_proof) {
-          item.status = 'CREDITABLE_REMITTANCE'; item.taxable = false; item.note = 'Keep official foreign-tax evidence.';
-        } else {
-          item.status = 'ASSESSABLE'; item.taxable = true;
-          assessableBase += r.amount_thb;
+      const assessments = args.planned_remittances_thb.map(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new Error('Each planned remittance must be an object');
         }
-        items.push(item);
-      }
-      const r = computeThaiTax(assessableBase, undefined);
-      const splitSuggestion = (() => {
-        const assessable = args.planned_remittances_thb.filter(x => x.earned_year >= 2024 && !((x.foreign_tax_paid_pct ?? 0) >= 15 && x.has_proof));
-        if (assessable.length < 2) return null;
-        const totalAssessable = assessable.reduce((s, x) => s + x.amount_thb, 0);
-        const half = totalAssessable / 2;
-        const oneYear = r.estimated_tax_thb;
-        const twoYears = computeThaiTax(otherIncome + half, undefined).estimated_tax_thb
-          + computeThaiTax(half, undefined).estimated_tax_thb;
         return {
-          strategy: 'Split remittances across two tax years',
-          tax_if_single_year: oneYear,
-          tax_if_split_two_years_approx: twoYears,
-          potential_saving_thb: Math.max(0, oneYear - twoYears),
+          amount_thb: item.amount_thb ?? null,
+          earned_year: item.earned_year ?? null,
+          foreign_tax_paid_pct: item.foreign_tax_paid_pct ?? null,
+          has_proof: item.has_proof ?? null,
+          status: 'NEEDS_REVIEW',
+          taxable: null,
         };
-      })();
-      return { content: [{ type: 'text', text: JSON.stringify({
-        assessments: items,
-        combined_estimate: r,
-        planning: splitSuggestion,
-        caveats: [
-          'Draft two-year grace period NOT enacted — excluded from computation',
-          'Standard deduction assumed; itemized deductions may lower liability',
-          'Not tax advice; verify with licensed advisor before acting',
-        ],
-        data_asof: '2026-08',
-      }, null, 2) }] };
+      });
+      return remittanceReviewResult({
+        is_tax_resident_180_days: args.is_tax_resident_180_days ?? null,
+        annual_assessable_income_thb: args.annual_assessable_income_thb ?? null,
+      }, assessments);
     },
   },
 
